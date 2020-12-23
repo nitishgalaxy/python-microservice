@@ -1,0 +1,676 @@
+https://www.youtube.com/watch?v=0iB5IPoTDts&feature=youtu.be
+
+
+
+What is Monolith:
+----------------------
+
+A monolith is a large codebase which has several different functionalities and is connected with a single big database.
+
+Different functionalities have:
+    - Common Database
+    - Common Codebase
+
+
+e.g.
+    1. Search functionality (High traffic)
+    2. Products List (Cache)
+    3. Products Recommendation (ML)
+    4. Contact functionality (Very Low traffic)
+
+
+Problem:
+1. Single functionality like Search cannot be scaled independently of other functionalities.
+2. Since it is one repository, it can have only 1 language.
+3. Conflict with other teams over change in common code.
+
+
+
+What is a Microservice 
+-------------------------
+
+Microservices are smaller independant services that have their own database and 
+they can communicate with each other over an Event Bus (via Messages). 
+
+
+e.g.
+
+Components:
+
+1.  i.Microservice 1
+    ii. Database 1
+2.  i.Microservice 2
+    ii. Database 2
+3.  i.Microservice 3
+    ii. Database 3
+4.  i.Microservice 4
+    ii. Database 4
+
+5. Common Event Bus
+
+
+
+Advantage:
+1. Scale microservice independantly (by adding more EC2 s)
+2. Separation of concerns. (One team can focus 100% on machine learning)
+3. Each team can choose their own language based on their needs.
+
+
+
+Project:
+---------------
+
+1. Frontend (SPA)
+2. Admin App (Django) in Docker 
+     i. Database 1   
+3. Main App (Flask)
+    i. Database 2
+4. RabbitMQ - for Main App and Admin App to communicate.
+
+
+
+Admin App:
+---------------
+
+https://www.django-rest-framework.org/tutorial/quickstart/
+
+# Create the project directory
+mkdir tutorial
+cd tutorial
+
+# Create a virtual environment 
+python3 -m venv env
+source env/bin/activate 
+
+pip install django
+pip install djangorestframework
+
+
+django-admin startproject admin
+
+cd admin 
+
+python3 manage.py runserver 
+
+
+Dockerfile:
+-------------
+
+FROM python:3.9
+ENV PYTHONUNBUFFERED 1
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r requirements.txt
+COPY . /app
+
+CMD python manage.py runserver 0.0.0.0:8000
+
+
+---------------------------
+
+
+ENV PYTHONUNBUFFERED 1  - Useful to get python error logs
+
+COPY . /app   - Copy all the files in app directory.
+
+
+requirements.txt 
+---------------------
+
+Django==3.1.3
+djangorestframework==3.12.2
+mysqlclient==2.0.1
+django-mysql==3.9
+django-cors-headers==3.5.0
+pika==1.1.0
+
+
+
+docker-compose.yml 
+----------------------
+version: '3.8'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: 'python manage.py runserver 0.0.0.0:8000'
+    ports:
+      - 8000:8000
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+
+  db:
+    image: mysql:5.7.22
+    restart: always
+    environment:
+      MYSQL_DATABASE: admin
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - .dbdata:/var/lib/mysql
+    ports:
+      - 33066:3306
+
+
+
+
+
+> docker-compose up 
+
+
+
+- Once DB is up, setup DB in Pycharm.
+
+_ Next we need to create tables...
+
+> docker-compose exec backend sh 
+// Connect to  backend service in interactive mode 
+
+> python manage.py startapp products 
+// Create a new project 
+
+
+- Make changes in Django (CORS, MySQL DB connection, product app, etc.)
+
+- Restart docker containers
+
+We need to run migration... so add model in :
+- products/models.py 
+
+
+// Run inside container:
+> python manage.py makemigrations
+
+> python manage.py migrate
+
+
+In django when we return the objects in an API, we need serializers.
+
+products/serializers.py 
+---------------------------
+
+from rest_framework import serializers
+
+from .models import Product
+
+
+class ProductSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product
+        fields = '__all__'
+
+
+
+
+In views, we will create CRUD and use serializers:
+
+products/views.py 
+---------------------
+
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .models import Product, User
+from .producer import publish
+from .serializers import ProductSerializer
+import random
+
+
+class ProductViewSet(viewsets.ViewSet):
+    def list(self, request):   # /api/products
+        products = Product.objects.all()
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data)
+
+    def create(self, request):   # /api/products
+        serializer = ProductSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        publish('product_created', serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def retrieve(self, request, pk=None):    # /api/products/<str:id>
+        product = Product.objects.get(id=pk)
+        serializer = ProductSerializer(product)
+        return Response(serializer.data)
+
+    def update(self, request, pk=None):      # /api/products/<str:id>
+        product = Product.objects.get(id=pk)
+        serializer = ProductSerializer(instance=product, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        publish('product_updated', serializer.data)
+        return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
+
+    def destroy(self, request, pk=None):     # /api/products/<str:id>
+        product = Product.objects.get(id=pk)
+        product.delete()
+        publish('product_deleted', pk)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class UserAPIView(APIView):
+    def get(self, _):
+        users = User.objects.all()
+        user = random.choice(users)
+        return Response({
+            'id': user.id
+        })
+
+
+- Creat Routes and map to View CRUD functions:-
+
+products/urls.py 
+-----------------
+
+from django.urls import path
+
+from .views import ProductViewSet, UserAPIView
+
+urlpatterns = [
+    path('products', ProductViewSet.as_view({
+        'get': 'list',
+        'post': 'create'
+    })),
+    path('products/<str:pk>', ProductViewSet.as_view({
+        'get': 'retrieve',
+        'put': 'update',
+        'delete': 'destroy'
+    })),
+    path('user', UserAPIView.as_view())
+]
+
+
+
+
+
+-------------------------------------------------------------------
+
+
+Creating 'main' app based on Flask.
+
+
+requirements.txt 
+---------------------
+
+Flask==1.1.2
+Flask-SQLAlchemy==2.4.4
+SQLAlchemy==1.3.20
+Flask-Migrate==2.5.3
+Flask-Script==2.0.6
+Flask-Cors==3.0.9
+requests==2.25.0
+mysqlclient==2.0.1
+pika==1.1.0
+
+
+
+Dockerfile
+-------------
+
+FROM python:3.9
+ENV PYTHONUNBUFFERED 1
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r requirements.txt
+COPY . /app
+
+CMD python main.py 
+
+
+
+
+docker-compose.yml 
+----------------------
+
+version: '3.8'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: 'python main.py'
+    ports:
+      - 8001:5000
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: 'python consumer.py'
+    depends_on:
+      - db
+
+  db:
+    image: mysql:5.7.22
+    restart: always
+    environment:
+      MYSQL_DATABASE: main
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - .dbdata:/var/lib/mysql
+    ports:
+      - 33067:3306
+
+
+
+
+> docker-compose up 
+
+
+
+In main.py which is the main Flask app :
+
+1. Implement CORS  
+
+     from flask_cors import CORS
+     app = Flask(__name__)
+     CORS(app)
+
+
+2. Implement DB config 
+
+    from flask_sqlalchemy import SQLAlchemy
+
+    app = Flask(__name__)
+    app.config["SQLALCHEMY_DATABASE_URI"] = 'mysql://root:root@db/main'
+    db = SQLAlchemy(app)
+
+
+3. Creaatee Models 
+
+
+from dataclasses import dataclass
+from sqlalchemy import UniqueConstraint
+
+
+db = SQLAlchemy(app)
+
+
+@dataclass
+class Product(db.Model):
+    id: int
+    title: str
+    image: str
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=False)
+    title = db.Column(db.String(200))
+    image = db.Column(db.String(200))
+
+
+@dataclass
+class ProductUser(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer)
+    product_id = db.Column(db.Integer)
+
+    UniqueConstraint('user_id', 'product_id', name='user_product_unique')
+
+
+4. Now we need to migrate.
+
+manager.py 
+-------------
+
+from main import app, db
+from flask_migrate import Migrate, MigrateCommand
+from flask_script import Manager
+
+migrate = Migrate(app, db)
+
+manager = Manager(app)
+manager.add_command('db', MigrateCommand)
+
+if __name__ == '__main__':
+    manager.run()
+
+
+
+https://blog.miguelgrinberg.com/post/flask-migrate-alembic-database-migration-wrapper-for-flask#:~:text=When%20you%20use%20Alembic%20alone,files%20ready%20to%20be%20used.&text=The%20migrate%20command%20adds%20a%20new%20migration%20script.
+
+
+>> docker-compose exec backend sh 
+
+> python manager.py db --help 
+
+To migrate:
+
+
+> python manager.py db init 
+
+> python manager.py db migrate   
+
+> python manager.py db upgrade 
+
+
+- Connect to DB in Pycharm and verify 
+
+
+
+
+
+Cloud Rabbitmq as a service:
+-------------------------------------------
+
+https://www.cloudamqp.com/plans.html
+
+
+producer.py 
+--------------
+
+import pika, json
+
+params = pika.URLParameters('your_rabbitmq_url')
+
+connection = pika.BlockingConnection(params)
+
+channel = connection.channel()
+
+
+def publish(method, body):
+    properties = pika.BasicProperties(method)
+    channel.basic_publish(exchange='', routing_key='admin', body=json.dumps(body), properties=properties)
+
+
+
+consumer.py 
+--------------
+
+import pika, json, os, django
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "admin.settings")
+django.setup()
+
+from products.models import Product
+
+params = pika.URLParameters('your_rabbitmq_url')
+
+connection = pika.BlockingConnection(params)
+
+channel = connection.channel()
+
+channel.queue_declare(queue='admin')
+
+
+def callback(ch, method, properties, body):
+    print('Received in admin')
+    id = json.loads(body)
+    print(id)
+    product = Product.objects.get(id=id)
+    product.likes = product.likes + 1
+    product.save()
+    print('Product likes increased!')
+
+
+channel.basic_consume(queue='admin', on_message_callback=callback, auto_ack=True)
+
+print('Started Consuming')
+
+channel.start_consuming()
+
+channel.close()
+
+
+
+
+https://pika.readthedocs.io/en/stable/examples/blocking_consume.html
+
+channel.start_consuming() - This creates a blocking connection to consume messages.
+
+
+
+Remove "CMD python main.py " from Dockerfile and add in 'command' section in docker-compose 
+
+
+
+
+Add RabbitMQ consumer logic in both the admin and main app.
+Update consumer worker in docker-compose.
+
+
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: 'python consumer.py'
+    depends_on:
+      - db
+
+
+
+
+
+
+-----------
+
+
+From admin app... While creating product:  send 'product_created' as messaage properties.
+
+
+    def create(self, request):
+        serializer = ProductSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        publish('product_created', serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+publish('product_created', serializer.data)
+
+
+
+def publish(method, body):
+    properties = pika.BasicProperties(method)
+    channel.basic_publish(exchange='', routing_key='main', body=json.dumps(body), properties=properties)
+
+
+
+
+Handle differeent properties (message type) logic in consumer:-
+
+
+
+main app consumer:
+---------------------
+
+import pika, json
+
+from main import Product, db
+
+params = pika.URLParameters('your_rabbitmq_url')
+
+connection = pika.BlockingConnection(params)
+
+channel = connection.channel()
+
+channel.queue_declare(queue='main')
+
+
+def callback(ch, method, properties, body):
+    print('Received in main')
+    data = json.loads(body)
+    print(data)
+
+    if properties.content_type == 'product_created':
+        product = Product(id=data['id'], title=data['title'], image=data['image'])
+        db.session.add(product)
+        db.session.commit()
+        print('Product Created')
+
+    elif properties.content_type == 'product_updated':
+        product = Product.query.get(data['id'])
+        product.title = data['title']
+        product.image = data['image']
+        db.session.commit()
+        print('Product Updated')
+
+    elif properties.content_type == 'product_deleted':
+        product = Product.query.get(data)
+        db.session.delete(product)
+        db.session.commit()
+        print('Product Deleted')
+
+
+channel.basic_consume(queue='main', on_message_callback=callback, auto_ack=True)
+
+print('Started Consuming')
+
+channel.start_consuming()
+
+channel.close()
+
+
+
+Internal HTTP Requests:
+
+import requests
+
+@app.route('/api/products/<int:id>/like', methods=['POST'])
+def like(id):
+    req = requests.get('http://docker.for.mac.localhost:8000/api/user')
+    json = req.json()
+
+    try:
+        productUser = ProductUser(user_id=json['id'], product_id=id)
+        db.session.add(productUser)
+        db.session.commit()
+
+        publish('product_liked', id)
+    except:
+        abort(400, 'You already liked this product')
+
+    return jsonify({
+        'message': 'success'
+    })
+
+
+
+
+==========================================================================
+
+React App 
+
+
+npm create-react-app  react-crud --template typescript 
+
+cd react-crud
+
+npm start 
+
+
+
+
+
+
+
